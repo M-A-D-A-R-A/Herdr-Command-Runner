@@ -1,0 +1,34 @@
+# Validation record — 0.1.0
+
+Validated on 2026-09-25. Private artifacts are intentionally outside this repository.
+
+| Check | Result |
+|---|---|
+| Synthetic runner suite | 15 tests passed on macOS |
+| Login-shell quoting | Bash and tcsh; literal quotes, newlines, Unicode, shell metacharacters |
+| Output integrity | 50 MiB stdout checksum matched; 100,000 stderr lines matched |
+| Local long command | 306 seconds, including a 66-second quiet interval; complete capture and exit 0 |
+| Real Linux SSH target | Python 3.6, tcsh; successful direct command execution |
+| Real SSH stress run | 312 seconds, 52,428,800 stdout bytes, 100,000 stderr lines plus two checkpoints; checksum and exact stderr matched |
+| Failure handling | Nonzero/255 exits distinguished from transport failures; partial output retained on disconnect, timeout, and interruption |
+| Context adapters | Verified context, noisy startup isolation, missing executable, shared-context busy rejection |
+| Viewer | Separate-process viewer closure leaves command running; terminal-control sanitizer tested |
+| Herdr integration | Manifest accepted and plugin linked locally with Herdr 0.9.1 |
+
+Actual Herdr pane rendering remains a manual smoke test: this implementation
+session was outside a Herdr-managed pane. From a Herdr pane, run:
+
+```sh
+herdr-command exec --cwd /tmp --view -- python3 -u -c 'import time; print("start"); time.sleep(5); print("done")'
+```
+
+Check that a dedicated tab opens without changing focus, displays elapsed time
+and output, and reports success. Close it during execution and inspect the result
+file to confirm capture continues. Existing investigation panes are never used
+for command injection.
+
+GitHub CI is configured for Linux and macOS but has not run remotely because the
+repository has not been published. Product-specific adapter validation belongs
+in the adapter's private repository. This proof does not claim recovery from
+power loss, interactive/daemonizing command support, or guaranteed termination
+of remote commands after a network failure.

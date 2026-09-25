@@ -1,0 +1,18 @@
+id = "community.command-runner"
+name = "Command Runner"
+version = "0.1.0"
+min_herdr_version = "0.9.1"
+description = "Capture local and SSH command output independently of terminal scrollback"
+platforms = ["linux", "macos"]
+
+[[actions]]
+id = "doctor"
+title = "Command runner diagnostics"
+contexts = ["workspace"]
+command = ["python3", "bin/herdr-command", "doctor"]
+
+[[panes]]
+id = "output"
+title = "Command output"
+placement = "tab"
+command = ["python3", "bin/herdr-command", "view"]
