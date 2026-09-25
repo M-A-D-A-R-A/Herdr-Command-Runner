@@ -1,0 +1,181 @@
+#!/usr/bin/env python3
+"""User-run setup. VM mode is standalone and supports Python 3.6+."""
+import argparse
+import hashlib
+import os
+from pathlib import Path
+import platform
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import uuid
+
+VERSION = "0.9.1"
+MINIMUM = (0, 9, 1)
+# Official https://herdr.dev/latest.json, release 0.9.1. Pin both asset and hash.
+SHA256 = {
+    "x86_64": "2a02fed16beb651ef006e1d43f048f652ca4dc58ad053cd2d44450563d5c54b7",
+    "aarch64": "f4ccf4de745f2cb9a39a983e9ba3703dad50ec2a58dea83026ceab721bbd8d9e",
+}
+MARKER = "# Herdr Command Runner: user bin PATH"
+
+
+def run(argv, timeout=30):
+    result = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            universal_newlines=True, timeout=timeout)
+    if result.returncode:
+        raise RuntimeError("{} failed: {}".format(argv[0], result.stderr.strip()))
+    return result.stdout.strip()
+
+
+def version(binary):
+    output = run([str(binary), "--version"])
+    match = re.search(r"\b(\d+)\.(\d+)\.(\d+)\b", output)
+    if not match:
+        raise RuntimeError("Unrecognized Herdr version: " + output)
+    return tuple(map(int, match.groups()))
+
+
+def existing(home):
+    # Prefer the binary a fresh shell will use after our PATH setup.
+    candidate = home / ".local/bin/herdr"
+    return candidate if candidate.is_file() else shutil.which("herdr")
+
+
+def checksum(path):
+    value = hashlib.sha256()
+    with path.open("rb") as source:
+        for block in iter(lambda: source.read(1024 * 1024), b""):
+            value.update(block)
+    return value.hexdigest()
+
+
+def path_setup(home, shell):
+    """Prepend before noninteractive guards; back up and never duplicate blocks."""
+    name = Path(shell).name
+    if name in ("csh", "tcsh"):
+        # tcsh falls back to .cshrc. Creating .tcshrc would hide that existing file.
+        rc = ".tcshrc" if name == "tcsh" and ((home / ".tcshrc").exists() or not (home / ".cshrc").exists()) else ".cshrc"
+        files = [home / rc]
+        line = 'if ( -d "$HOME/.local/bin" ) setenv PATH "$HOME/.local/bin:$PATH"'
+    elif name == "zsh":
+        files = [home / ".zshenv"]
+        line = 'export PATH="$HOME/.local/bin:$PATH"'
+    elif name in ("bash", "sh", "dash"):
+        login = next((home / f for f in (".bash_profile", ".bash_login", ".profile")
+                      if (home / f).exists()), home / ".profile") if name == "bash" else home / ".profile"
+        files = [home / ".bashrc", login] if name == "bash" else [login]
+        line = 'export PATH="$HOME/.local/bin:$PATH"'
+    else:
+        raise RuntimeError("Unsupported login shell {}. Use --no-path and add ~/.local/bin manually.".format(shell))
+    for path in files:
+        text = path.read_text() if path.exists() else ""
+        if MARKER in text:
+            continue
+        if path.exists():
+            backup = path.with_name(path.name + ".before-herdr-command-" + uuid.uuid4().hex[:8])
+            shutil.copy2(str(path), str(backup))
+        # Follow existing shell-rc symlinks, preserving users' dotfile layouts.
+        with path.open("w") as output:
+            output.write(MARKER + "\n" + line + "\n" + text)
+        print("PATH configured: " + str(path))
+
+
+def install_vm(home, args):
+    if platform.system() != "Linux":
+        raise RuntimeError("VM setup supports Linux. Run the local subcommand on your laptop.")
+    arch = {"amd64": "x86_64", "arm64": "aarch64"}.get(platform.machine(), platform.machine())
+    if arch not in SHA256:
+        raise RuntimeError("Unsupported VM architecture: " + arch)
+    binary = existing(home)
+    if binary and version(binary) >= MINIMUM:
+        print("Herdr ready: {} ({})".format(binary, run([str(binary), "--version"])))
+    elif args.check:
+        raise RuntimeError("Herdr 0.9.1+ missing; rerun without --check to install.")
+    else:
+        destination = home / ".local/bin/herdr"
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        # A same-filesystem staging directory permits an atomic final rename.
+        with tempfile.TemporaryDirectory(prefix=".herdr-setup-", dir=str(destination.parent)) as directory:
+            stage = Path(directory) / "herdr"
+            if args.binary:
+                shutil.copyfile(str(Path(args.binary).expanduser()), str(stage))
+            else:
+                if not shutil.which("curl"):
+                    raise RuntimeError("curl missing. Supply --binary /path/to/herdr-linux-{} downloaded on another computer.".format(arch))
+                url = "https://github.com/herdrdev/herdr/releases/download/v{}/herdr-linux-{}".format(VERSION, arch)
+                print("Downloading Herdr {} directly from GitHub...".format(VERSION), flush=True)
+                try:
+                    run(["curl", "--fail", "--silent", "--show-error", "--location",
+                         "--proto", "=https", "--proto-redir", "=https", "--connect-timeout", "15",
+                         "--max-time", "180", url, "--output", str(stage)], timeout=190)
+                except (RuntimeError, subprocess.TimeoutExpired) as exc:
+                    raise RuntimeError(str(exc) + "\nDownload {} elsewhere, copy it here, and rerun with --binary FILE.".format(url))
+            if checksum(stage) != SHA256[arch]:
+                raise RuntimeError("SHA256 mismatch. Existing Herdr was preserved; do not run the downloaded file.")
+            stage.chmod(0o755)
+            if version(stage) != MINIMUM:
+                raise RuntimeError("Downloaded binary reports an unexpected version; existing Herdr was preserved.")
+            if destination.exists() or destination.is_symlink():
+                backup = destination.with_name("herdr.before-command-setup-" + uuid.uuid4().hex[:8])
+                shutil.copy2(str(destination), str(backup))
+                print("Previous executable backed up: " + str(backup))
+            os.replace(str(stage), str(destination))
+            binary = destination
+        print("Herdr installed: " + str(binary))
+    if not args.check and not args.no_path:
+        path_setup(home, os.environ.get("SHELL", "/bin/sh"))
+    print("Python ready: " + platform.python_version())
+    print("VM prerequisites ready. No server or prepared command environment was started or verified.")
+    print("Open a fresh SSH login, run ~/.local/bin/herdr (or the existing binary above),")
+    print("then prepare your dedicated shell there. Existing sessions were not restarted.")
+
+
+def install_local(home, args):
+    if sys.version_info < (3, 8):
+        raise RuntimeError("The laptop runner requires Python 3.8+.")
+    root = Path(__file__).resolve().parents[1]
+    if not (root / "herdr-plugin.toml").is_file() or not (root / "bin/herdr-command").is_file():
+        raise RuntimeError("Run local setup from a complete herdr-command-runner checkout.")
+    herdr = shutil.which("herdr")
+    if not herdr or version(herdr) < MINIMUM:
+        raise RuntimeError("Install/update local Herdr to 0.9.1+ first: https://herdr.dev")
+    if args.check:
+        print("Local prerequisites ready. Plugin linkage is not checked by --check.")
+        return
+    destination = home / ".local/bin/herdr-command"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.exists() or destination.is_symlink():
+        if destination.resolve() != (root / "bin/herdr-command").resolve():
+            raise RuntimeError("Existing {} points elsewhere; kept it. Use {}/bin/herdr-command directly.".format(destination, root))
+    print(run([herdr, "plugin", "link", str(root)]))
+    if not destination.exists() and not destination.is_symlink():
+        destination.symlink_to(root / "bin/herdr-command")
+    if not args.no_path:
+        path_setup(home, os.environ.get("SHELL", "/bin/sh"))
+    print("Local CLI and viewer linked. Keep this checkout at: " + str(root))
+    print("Open a new terminal; then run herdr-command doctor.")
+    print("Next: save the SSH machine and bind a dedicated prepared pane. No remote changes were made.")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("side", choices=("vm", "local"))
+    parser.add_argument("--check", action="store_true", help="Read-only prerequisites check; no downloads or writes")
+    parser.add_argument("--no-path", action="store_true", help="Do not edit shell startup files")
+    parser.add_argument("--binary", help="VM: offline official Linux Herdr 0.9.1 binary; SHA256 still required")
+    args = parser.parse_args()
+    if sys.version_info < (3, 6):
+        parser.error("VM helper needs Python 3.6+. Ask your VM administrator to provide python3.")
+    if args.binary and (args.side != "vm" or args.check):
+        parser.error("--binary is only valid with vm, without --check")
+    (install_vm if args.side == "vm" else install_local)(Path.home(), args)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (RuntimeError, OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        sys.exit("Setup failed: " + str(exc))

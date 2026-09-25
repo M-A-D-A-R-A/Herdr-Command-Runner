@@ -21,6 +21,11 @@ execution and required to use the plugin viewer.
 
 ## Install
 
+For a guided laptop + Linux VM install, see [setup instructions](docs/setup.md).
+The VM downloads Herdr directly from GitHub and verifies the pinned checksum;
+the capture helper is transferred automatically when commands run. From this
+checkout, laptop setup is `python3 bin/herdr-command-setup local`.
+
 Link the plugin and make the CLI available in your current shell:
 
 ```sh
