@@ -146,7 +146,8 @@ def open_viewer(directory, workspace=None):
         return "Viewer needs Herdr and an explicit --workspace (or a Herdr pane)."
     command = [binary, "plugin", "pane", "open", "--plugin", PLUGIN_ID,
                "--entrypoint", "output", "--placement", "tab", "--no-focus",
-               "--workspace", workspace, "--env", "HERDR_COMMAND_RUN=" + str(directory)]
+               "--workspace", workspace, "--env", "HERDR_COMMAND_RUN=" + str(directory),
+               "--env", "HERDR_COMMAND_VIEWER=1"]
     try:
         result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15)
         if result.returncode:
@@ -329,6 +330,17 @@ def execute_with_progress(args, progress):
     return 0 if result["status"] == "succeeded" else 75 if result["status"] == "busy" else 125 if result["status"] == "unknown" else 1
 
 
+def finish_viewer(result):
+    owned = os.environ.get("HERDR_COMMAND_VIEWER") == "1"
+    if owned and result.get("status") == "succeeded" and result.get("exit_code") == 0:
+        print("Completed successfully. Closing this viewer in 3 seconds; saved artifacts are retained.", flush=True)
+        time.sleep(3)
+        # Herdr removes this plugin pane when the viewer process exits.
+        return
+    if sys.stdin.isatty():
+        input("Finished. Press Enter to close this viewer. ")
+
+
 def viewer(path):
     if not path:
         raise ValueError("Set HERDR_COMMAND_RUN or use view <run-directory>")
@@ -376,8 +388,7 @@ def viewer(path):
         if result.get("finished_at") and drained:
             if result.get("error"):
                 print(SafeText().feed(result["error"].encode()))
-            if sys.stdin.isatty():
-                input("Finished. Press Enter to close this viewer. ")
+            finish_viewer(result)
             return 0
         time.sleep(0.02 if not drained else 0.2)
 

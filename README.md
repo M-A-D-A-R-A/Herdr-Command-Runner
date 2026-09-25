@@ -64,6 +64,11 @@ arguments remain the source of record. You can also open a saved run directly:
 herdr-command view /path/to/run-directory
 ```
 
+Viewers opened by `--view` close automatically three seconds after confirmed
+success (exit 0). Failed, rejected, busy, and unknown results stay open until
+Enter. Saved artifacts are retained. Manually running `herdr-command view`
+keeps its review behavior and never closes the calling shell.
+
 Add `--progress` to print execution stages and elapsed time on stderr, including
 five-second updates during quiet waits. Stdout retains its result-path interface
 and captured stdout/stderr files contain only the command's output. The viewer

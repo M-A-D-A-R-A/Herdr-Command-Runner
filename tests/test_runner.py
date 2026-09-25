@@ -11,9 +11,10 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from herdr_command.cli import Protocol, SafeText, open_viewer
+from herdr_command.cli import Protocol, SafeText, open_viewer, finish_viewer
 
 ROOT = Path(__file__).resolve().parents[1]
 CLI = ROOT / "bin/herdr-command"
@@ -223,6 +224,33 @@ class RunnerTests(unittest.TestCase):
         self.assertIn('Viewer unavailable',proc.stderr)
         self.assertIn('viewer_error',result)
         self.assertEqual((folder/'stdout.bin').read_text(),'still captured\n')
+
+    def test_successful_plugin_viewer_closes_after_three_seconds(self):
+        with patch.dict(os.environ,{'HERDR_COMMAND_VIEWER':'1'}), \
+             patch('herdr_command.cli.time.sleep') as sleep, \
+             patch('builtins.input') as prompt:
+            finish_viewer({'status':'succeeded','exit_code':0})
+        sleep.assert_called_once_with(3)
+        prompt.assert_not_called()
+
+    def test_unsuccessful_viewers_wait_for_enter(self):
+        for status,code in (('failed',1),('unknown',None),('busy',None),('rejected',None),('succeeded',None)):
+            with self.subTest(status=status), patch.dict(os.environ,{'HERDR_COMMAND_VIEWER':'1'}), \
+                 patch('herdr_command.cli.time.sleep') as sleep, \
+                 patch('herdr_command.cli.sys.stdin.isatty',return_value=True), \
+                 patch('builtins.input') as prompt:
+                finish_viewer({'status':status,'exit_code':code})
+            sleep.assert_not_called()
+            prompt.assert_called_once()
+
+    def test_manual_view_retains_review_behavior(self):
+        with patch.dict(os.environ,{'HERDR_COMMAND_VIEWER':''}), \
+             patch('herdr_command.cli.time.sleep') as sleep, \
+             patch('herdr_command.cli.sys.stdin.isatty',return_value=True), \
+             patch('builtins.input') as prompt:
+            finish_viewer({'status':'succeeded','exit_code':0})
+        sleep.assert_not_called()
+        prompt.assert_called_once()
 
 
 if __name__ == "__main__":

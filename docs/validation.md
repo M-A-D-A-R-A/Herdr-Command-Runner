@@ -56,3 +56,8 @@ busy shells, mismatched process-info, and invalid bindings still prevent input.
 One paired live source-read sample fell from 37.66 seconds to 17.39 seconds total
 wall time. The 131-line outputs matched byte-for-byte and both returned exit 0.
 This is one network-dependent measurement, not a guaranteed latency bound.
+
+Viewer auto-close follow-up: 32 runner tests passed. In an isolated real Herdr
+session, a successful viewer exited after the three-second completion notice and
+its tab disappeared; a failed viewer remained until Enter. Manual review viewers
+retain their existing behavior. Output artifacts remain intact.
