@@ -48,3 +48,11 @@ Closing a real viewer during a 25-second command preserved complete output and
 exit status 0. Read-only private-adapter verification also displayed its stages
 and captured result in that isolated session. The temporary test server was
 stopped after validation; existing user sessions were not stopped or restarted.
+
+Latency follow-up: 29 runner tests passed. A saved binding no longer triggers
+a duplicate early remote inspection; both independent live pane checks run
+concurrently immediately before submission. Tests confirm that changed terminals,
+busy shells, mismatched process-info, and invalid bindings still prevent input.
+One paired live source-read sample fell from 37.66 seconds to 17.39 seconds total
+wall time. The 131-line outputs matched byte-for-byte and both returned exit 0.
+This is one network-dependent measurement, not a guaranteed latency bound.

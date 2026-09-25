@@ -165,12 +165,13 @@ def execute_with_progress(args, progress):
     binding = json.loads(Path(args.binding).expanduser().read_text()) if args.binding else None
     machine = None
     if binding or args.machine or args.pane:
-        progress.update("Checking the registered machine, pane, and foreground shell")
+        progress.update("Loading the saved machine and pane binding" if binding else
+                        "Checking the machine, pane, and foreground shell")
         selector = args.machine or (binding or {}).get("machine")
         pane = args.pane or (binding or {}).get("pane_id")
         if not selector or not pane:
             raise ValueError("Pane execution requires --machine and --pane, or --binding")
-        machine = Machine(selector, pane, args.herdr_bin, binding)
+        machine = Machine(selector, pane, args.herdr_bin, binding, defer_inspection=bool(binding))
         if args.ssh and args.ssh != machine.profile["target"]:
             raise ValueError("SSH target must match the selected Herdr machine target")
         args.ssh = machine.profile["target"]
@@ -244,7 +245,7 @@ def execute_with_progress(args, progress):
                     if machine is None or getattr(args, "recover_request", None):
                         raise ValueError("Unexpected pane launch request")
                     result.update(status="submitting", remote_directory=item["remote_directory"])
-                    progress.update("Checking the pane again and submitting capture")
+                    progress.update("Verifying the live pane and shell, then submitting capture")
                     save(directory / "result.json", result)
                     machine.launch(item["command"])
                     progress.update("Waiting for the capture helper to verify context")

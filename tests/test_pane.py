@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -134,7 +135,7 @@ class PaneTests(unittest.TestCase):
             if args[0] == "machine":
                 return [dict(id="machine-1", label="test", target="test-host", session="default", enabled=True)]
             if args[1] == "list": return {"panes":[pane]}
-            if args[1] == "process-info": return {"process_info":dict(foreground_process_group_id=123,foreground_processes=[foreground])}
+            if args[1] == "process-info": return {"process_info":dict(pane_id="w1:p1",foreground_process_group_id=123,foreground_processes=[foreground])}
             raise AssertionError("No command should be submitted")
         with patch.object(Machine,"call",call):
             selected = Machine("test", "w1:p1")
@@ -150,6 +151,47 @@ class PaneTests(unittest.TestCase):
         with patch("herdr_command.machine.subprocess.run", return_value=subprocess.CompletedProcess([],0,b"",b"")):
             self.assertEqual(machine.call("pane","run","w1:p1","command"),{})
             with self.assertRaises(ValueError): machine.call("pane","list")
+
+    def test_saved_binding_defers_checks_but_never_skips_live_validation(self):
+        calls=[]
+        pane=dict(pane_id='w1:p1',terminal_id='t1')
+        process=dict(pane_id='w1:p1',foreground_process_group_id=123,
+                     foreground_processes=[dict(pid=123,name='tcsh')])
+        binding=dict(self.identity,terminal_id='t1',shell_pid=123)
+        def call(instance,*args,**kwargs):
+            calls.append(args)
+            if args[0]=='machine':return [dict(id='machine-1',label='test',target='test-host',session='default',enabled=True)]
+            if args[1]=='list':return {'panes':[pane]}
+            if args[1]=='process-info':return {'process_info':process}
+            if args[1]=='run':return {}
+            raise AssertionError(args)
+        with patch.object(Machine,'call',call):
+            machine=Machine('test','w1:p1',binding=binding,defer_inspection=True)
+            self.assertEqual(calls,[('machine','list','--json')])
+            machine.launch('approved command')
+            self.assertEqual(sum(c[:2]==('pane','list') for c in calls),1)
+            self.assertEqual(sum(c[:2]==('pane','process-info') for c in calls),1)
+            for changed in ('terminal','busy','wrong-pane'):
+                calls.clear()
+                pane['terminal_id']='other' if changed=='terminal' else 't1'
+                process['foreground_processes'][0]['name']='vim' if changed=='busy' else 'tcsh'
+                process['pane_id']='other' if changed=='wrong-pane' else 'w1:p1'
+                with self.assertRaises(ValueError):machine.launch('must not submit')
+                self.assertFalse(any(c[:2]==('pane','run') for c in calls))
+            for field,value in (('target','different-host'),('session','different-session'),('shell_pid',None),('terminal_id','')):
+                with self.assertRaises(ValueError):
+                    Machine('test','w1:p1',binding=dict(binding,**{field:value}),defer_inspection=True)
+
+    def test_pane_and_process_checks_run_concurrently(self):
+        barrier=threading.Barrier(2)
+        def call(instance,*args,**kwargs):
+            if args[0]=='machine':return [dict(id='machine-1',label='test',target='test-host',session='default',enabled=True)]
+            barrier.wait(timeout=2)
+            if args[1]=='list':return {'panes':[dict(pane_id='w1:p1',terminal_id='t1')]}
+            return {'process_info':dict(pane_id='w1:p1',foreground_process_group_id=123,
+                                        foreground_processes=[dict(pid=123,name='tcsh')])}
+        with patch.object(Machine,'call',call):
+            self.assertEqual(Machine('test','w1:p1').identity['shell_pid'],123)
 
     def test_request_deadline_must_be_finite(self):
         for option in ("--startup-timeout", "--timeout"):

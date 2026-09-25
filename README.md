@@ -100,8 +100,10 @@ Alternatively use `exec --machine "Build machine" --pane w1:p1 --cwd /srv/projec
 `--herdr-bin PATH` selects a compatible CLI/launcher. The SSH target is taken from
 the saved machine; an explicitly provided `--ssh` must match it.
 
-Each run checks the pinned terminal and foreground shell, stages a private
-single-use request through SSH, and uses Herdr Machine to launch capture inside
+With a saved binding, each run validates its local machine/target/session fields,
+stages a private single-use request through SSH, then checks the live pinned
+terminal and foreground shell immediately before submission. The two independent
+read-only pane checks run concurrently. Herdr Machine launches capture inside
 that existing shell. It inherits the shell environment. An adapter's `prepare`
 hook still verifies context, but its `enter` hook is skipped. There is no repeated
 context startup and no terminal-output scraping. The helper stays in the
@@ -131,6 +133,12 @@ Herdr's process check and input submission are separate API calls, so they do
 not atomically reserve a prompt against a person typing at the same moment.
 Checks before submission, parent-shell verification, expiry, and single-use
 claims reduce mistakes but do not make concurrent manual input safe.
+
+No cached liveness or ADE result authorizes execution. The remote helper still
+checks its actual parent shell and the adapter verifies ADE context on each run.
+If the final pane check fails, nothing is submitted; an already-staged unused
+reservation may remain until its startup deadline expires. Do not automatically
+retry or delete reservations to bypass a busy/unknown result.
 
 ## Test and extend
 
