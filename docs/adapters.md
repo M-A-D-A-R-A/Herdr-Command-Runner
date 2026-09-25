@@ -35,3 +35,7 @@ Use a stable `--context` identity for mutually exclusive work even if different
 directories refer to it. No plugin registry or implicit adapter discovery is used.
 Private context adapters can live in separate repositories; the public runner
 does not import them or depend on their configuration formats.
+
+With a bound Herdr machine pane, the runner skips `enter` and invokes `prepare`
+inside the registered existing shell. Adapters must verify context every time;
+registration and a matching working-directory string are not proof of environment.

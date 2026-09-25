@@ -32,3 +32,10 @@ repository has not been published. Product-specific adapter validation belongs
 in the adapter's private repository. This proof does not claim recovery from
 power loss, interactive/daemonizing command support, or guaranteed termination
 of remote commands after a network failure.
+
+Prepared-pane extension: nine additional tests cover inherited context without
+re-entry, foreground-shell identity, changed/busy panes, single-use claims,
+expired requests, concurrent submission rejection, empty successful Herdr
+responses, and disconnect/recovery without re-execution. The existing capture
+suite continues to pass. A live remote prepared-shell run and recovery were
+verified; product-specific results remain in the private adapter repository.

@@ -6,7 +6,8 @@ pipes rather than terminal scrollback. Version **0.1.0**.
 
 Requires Python 3.8+ locally, Python 3.6+ on an SSH host, and macOS or Linux.
 Herdr 0.9.1+ is optional for execution and required for the plugin viewer.
-No daemon, queue, third-party Python package, or remote Herdr install is required.
+No daemon, queue, or third-party Python package is required. Direct SSH mode does
+not require remote Herdr; prepared-pane mode uses an existing remote Herdr server.
 
 ## Install locally
 
@@ -77,6 +78,53 @@ and 2 for invalid usage. Read `exit_code` for the actual command exit status.
 - Raw artifacts and command arguments can contain secrets; keep them private.
   Disk usage grows with output. Disk-write failures produce an unknown outcome.
   No telemetry or uploads are performed.
+
+## Reuse a prepared Herdr machine pane
+
+Use a dedicated idle shell that already has the desired environment. Select its
+remote pane ID explicitly; the runner never picks the focused pane or creates a
+replacement. The saved machine must be enabled and reachable.
+
+```sh
+herdr-command bind --machine "Build machine" --pane w1:p1 --output /private/path/build-pane.json
+herdr-command exec --binding /private/path/build-pane.json --cwd /srv/project -- make test
+```
+
+Alternatively use `exec --machine "Build machine" --pane w1:p1 --cwd /srv/project`.
+`--herdr-bin PATH` selects a compatible CLI/launcher. The SSH target is taken from
+the saved machine; an explicitly provided `--ssh` must match it.
+
+Each run checks the pinned terminal and foreground shell, stages a private
+single-use request through SSH, and uses Herdr Machine to launch capture inside
+that existing shell. It inherits the shell environment. An adapter's `prepare`
+hook still verifies context, but its `enter` hook is skipped. There is no repeated
+context startup and no terminal-output scraping. The helper stays in the
+foreground; a file reservation rejects concurrent or unresolved submissions.
+
+Requests expire if not started within `--startup-timeout` seconds (default 60),
+so delayed terminal input cannot execute an old request later. That deadline is
+separate from the optional overall execution timeout. A request can only be
+claimed once. A changed terminal/shell requires re-registration.
+
+The VM saves a private framed capture under
+`~/.local/state/herdr-command/pane-runs/<remote_run>/`. Local result metadata records
+its ID. If SSH drops, capture can continue in the remote pane. Recover it with:
+
+```sh
+herdr-command recover /path/to/original/local/run-directory
+```
+
+Recovery only reads that capture; it never sends a pane command. Keep local
+`request.json` with `result.json` for recovery. Remote artifacts are retained until
+you deliberately remove them after execution ends. A killed capture with no
+final result remains unknown and can require manual inspection; never delete a
+reservation merely to force another execution.
+
+Keep the designated pane dedicated to automation while requests are active.
+Herdr's process check and input submission are separate API calls, so they do
+not atomically reserve a prompt against a person typing at the same moment.
+Checks before submission, parent-shell verification, expiry, and single-use
+claims reduce mistakes but do not make concurrent manual input safe.
 
 ## Test and extend
 

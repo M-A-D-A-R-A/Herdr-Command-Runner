@@ -3,6 +3,7 @@ import codecs
 import datetime
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import selectors
@@ -16,6 +17,7 @@ import uuid
 
 from . import __version__
 from .worker import bootstrap, write_all
+from .machine import Machine
 
 PLUGIN_ID = "community.command-runner"
 
@@ -66,6 +68,7 @@ class Protocol:
         self.buffer = bytearray()
         self.completed = False
         self.started = False
+        self.prepared = False
 
     def feed(self, data):
         self.buffer.extend(data)
@@ -83,7 +86,9 @@ class Protocol:
                 if item.get("nonce") != self.nonce:
                     raise ValueError("Execution stream identity mismatch")
                 event = item.get("event")
-                if event == "started" and not self.started:
+                if event == "prepared" and not self.prepared and not self.started:
+                    self.prepared = True
+                elif event == "started" and not self.started:
                     self.started = True
                 elif event == "result":
                     if item.get("exit_code") is not None and not self.started:
@@ -116,6 +121,17 @@ def open_viewer(directory, workspace=None):
 
 
 def execute(args):
+    binding = json.loads(Path(args.binding).expanduser().read_text()) if args.binding else None
+    machine = None
+    if binding or args.machine or args.pane:
+        selector = args.machine or (binding or {}).get("machine")
+        pane = args.pane or (binding or {}).get("pane_id")
+        if not selector or not pane:
+            raise ValueError("Pane execution requires --machine and --pane, or --binding")
+        machine = Machine(selector, pane, args.herdr_bin, binding)
+        if args.ssh and args.ssh != machine.profile["target"]:
+            raise ValueError("SSH target must match the selected Herdr machine target")
+        args.ssh = machine.profile["target"]
     argv = args.argv[1:] if args.argv[:1] == ["--"] else args.argv
     if not argv:
         raise ValueError("Provide a program and arguments after --")
@@ -123,7 +139,7 @@ def execute(args):
         raise ValueError("Invalid SSH target")
     if not args.cwd.startswith(("/", "~")):
         raise ValueError("--cwd must be absolute or home-relative")
-    if args.timeout is not None and args.timeout <= 0:
+    if args.timeout is not None and (not math.isfinite(args.timeout) or args.timeout <= 0):
         raise ValueError("--timeout must be positive")
     os.umask(0o077)
     root = Path(args.output_dir or Path.home() / ".local/state/herdr-command/runs").expanduser().resolve()
@@ -135,15 +151,30 @@ def execute(args):
     if args.adapter:
         request["adapter_source"] = Path(args.adapter).read_text()
         request["adapter_config"] = json.loads(Path(args.adapter_config).read_text()) if args.adapter_config else {}
+    if machine:
+        request.update(pane_identity=machine.identity, startup_timeout=args.startup_timeout,
+                       pane_source=Path(__file__).with_name("pane_endpoint.py").read_text())
+    if getattr(args, "recover_request", None):
+        request = dict(args.recover_request, recover=True)
+        nonce = request["nonce"]
+    pane_mode = "pane_source" in request
+    entry_source = request["pane_source"] if pane_mode else source
     encoded_request = json.dumps(request).encode() + b"\n"
     if len(encoded_request) > 1024 * 1024:
         raise ValueError("Execution request exceeds 1 MiB")
-    command = (["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", "-T", args.ssh, bootstrap(source)]
+    command = (["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", "-T", args.ssh, bootstrap(entry_source)]
                if args.ssh else [sys.executable, str(Path(__file__).with_name("worker.py"))])
     result = dict(version=__version__, run_id=directory.name, status="starting", started_at=now(),
                   argv=argv, target=args.ssh or "local", cwd=args.cwd, context=args.context,
                   exit_code=None, artifacts={name: str(directory / name) for name in
                   ("stdout.bin", "stderr.bin", "transport.log", "result.json")})
+    if pane_mode:
+        result.update(execution_mode="pane", pane_identity=request["pane_identity"], remote_run=nonce)
+        save(directory / "request.json", request)
+        result["request_path"] = str(directory / "request.json")
+        if getattr(args, "recover_request", None):
+            result.update(recovery_only=True, recovered_from=args.recovered_from,
+                          original_started_at=args.original_started_at)
     if args.adapter:
         result["adapter"] = {"name": Path(args.adapter).name,
                              "sha256": hashlib.sha256(request["adapter_source"].encode()).hexdigest()}
@@ -163,7 +194,13 @@ def execute(args):
              open(directory / "transport.log", "wb", buffering=0) as transport:
             def control(item):
                 nonlocal final_received
-                if item["event"] == "started":
+                if item["event"] == "prepared":
+                    if machine is None or getattr(args, "recover_request", None):
+                        raise ValueError("Unexpected pane launch request")
+                    result.update(status="submitting", remote_directory=item["remote_directory"])
+                    save(directory / "result.json", result)
+                    machine.launch(item["command"])
+                elif item["event"] == "started":
                     result.update(status="running", provenance=item["provenance"], pid=item["pid"], executed_argv=item["argv"])
                 else:
                     final_received = True
@@ -282,11 +319,28 @@ def main():
     parser.add_argument("--version", action="version", version=__version__)
     sub = parser.add_subparsers(dest="action", required=True)
     sub.add_parser("doctor")
+    bind = sub.add_parser("bind", help="Pin an explicitly selected prepared remote shell")
+    bind.add_argument("--machine", required=True)
+    bind.add_argument("--pane", required=True)
+    bind.add_argument("--output", required=True)
+    bind.add_argument("--herdr-bin", default=os.environ.get("HERDR_COMMAND_HERDR_BIN", "herdr"))
+    recover = sub.add_parser("recover", help="Collect an existing pane run without submitting a command")
+    recover.add_argument("directory")
+    recover.add_argument("--output-dir")
+    recover.add_argument("--timeout", type=float)
+    recover.add_argument("--view", action="store_true")
+    recover.add_argument("--workspace")
     view = sub.add_parser("view")
     view.add_argument("directory", nargs="?", default=os.environ.get("HERDR_COMMAND_RUN"))
     run = sub.add_parser("exec")
     run.add_argument("--cwd", required=True)
     run.add_argument("--ssh", help="SSH host or configured alias; omitted means local")
+    run.add_argument("--machine", help="Use a prepared pane on this saved Herdr machine")
+    run.add_argument("--pane", help="Explicit remote pane ID; never the focused pane")
+    run.add_argument("--binding", help="Pinned machine/pane identity saved by bind")
+    run.add_argument("--herdr-bin", default=os.environ.get("HERDR_COMMAND_HERDR_BIN", "herdr"))
+    run.add_argument("--startup-timeout", type=float, default=60,
+                     help="Pane request expires if not started within this many seconds (default 60)")
     run.add_argument("--context", help="Serialize commands sharing this context on the execution host")
     run.add_argument("--output-dir", help="Parent directory for private per-run artifacts")
     run.add_argument("--timeout", type=float, help="Optional overall timeout in seconds")
@@ -302,8 +356,27 @@ def main():
                               "ssh": shutil.which("ssh"), "herdr": shutil.which("herdr"),
                               "platform": sys.platform, "remote": "Use exec for a target-specific probe"}, indent=2))
             return 0
+        if args.action == "bind":
+            selected = Machine(args.machine, args.pane, args.herdr_bin)
+            path = Path(args.output).expanduser().resolve()
+            os.umask(0o077)
+            path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            save(path, dict(selected.identity, registered_at=now()))
+            print(str(path))
+            return 0
+        if args.action == "recover":
+            directory = Path(args.directory).expanduser()
+            previous = json.loads((directory / "result.json").read_text())
+            request = json.loads((directory / "request.json").read_text())
+            args = argparse.Namespace(**dict(vars(args), argv=request["argv"], cwd=request["cwd"],
+                context=request.get("context"), ssh=previous["target"], recover_request=request,
+                recovered_from=str(directory.resolve()), original_started_at=previous.get("original_started_at", previous["started_at"]),
+                binding=None, machine=None, pane=None, adapter=None, herdr_bin="herdr"))
+            return execute(args)
+        if args.action == "exec" and (not math.isfinite(args.startup_timeout) or args.startup_timeout <= 0):
+            raise ValueError("--startup-timeout must be positive")
         return viewer(args.directory) if args.action == "view" else execute(args)
-    except (ValueError, OSError) as exc:
+    except (ValueError, OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
         print("herdr-command: " + str(exc), file=sys.stderr)
         return 2
     except KeyboardInterrupt:
