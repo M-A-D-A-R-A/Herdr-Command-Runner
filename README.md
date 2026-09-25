@@ -1,15 +1,27 @@
 # Herdr Command Runner
 
-Experimental foreground command capture for local and SSH execution. A Herdr
-pane shows live output; raw output and confirmed exit status come from process
-pipes rather than terminal scrollback. Version **0.1.0**.
+Run foreground commands locally or over SSH and keep a reliable record of what
+happened. Herdr Command Runner captures raw stdout, stderr, exit status, and
+transport diagnostics from process pipes—not from terminal scrollback.
 
-Requires Python 3.8+ locally, Python 3.6+ on an SSH host, and macOS or Linux.
-Herdr 0.9.1+ is optional for execution and required for the plugin viewer.
-No daemon, queue, or third-party Python package is required. Direct SSH mode does
-not require remote Herdr; prepared-pane mode uses an existing remote Herdr server.
+Version **0.1.0**. It runs on macOS and Linux with Python 3.8+ locally (Python
+3.6+ is supported on an SSH host). Herdr 0.9.1+ is optional for command
+execution and required to use the plugin viewer.
 
-## Install locally
+## What it does
+
+- Runs local commands or commands on a configured SSH host.
+- Saves exact `stdout.bin`, `stderr.bin`, `transport.log`, and `result.json`
+  artifacts for each run.
+- Shows live output in a Herdr tab when available, without relying on terminal
+  scrollback.
+- Can use a deliberately selected, prepared Herdr machine pane when a command
+  must inherit an existing remote shell environment.
+- Needs no daemon, queue, telemetry, or third-party Python package.
+
+## Install
+
+Link the plugin and make the CLI available in your current shell:
 
 ```sh
 herdr plugin link /absolute/path/to/herdr-command-runner
@@ -17,128 +29,89 @@ export PATH="/absolute/path/to/herdr-command-runner/bin:$PATH"
 herdr-command doctor
 ```
 
-The PATH export applies to the current shell; add it to your shell configuration
-if you want it to persist. Linking does not modify shell configuration.
+Add the `PATH` export to your shell configuration if you want it to persist.
+Linking the plugin does not modify shell configuration.
 
 ## Run a command
 
+Every run needs an explicit working directory. Arguments after `--` are passed
+literally to the command.
+
 ```sh
+# Run locally
 herdr-command exec --cwd /absolute/path/to/project -- python3 -m unittest
+
+# Run on an SSH host configured in ~/.ssh/config
 herdr-command exec --ssh build-host --cwd /srv/project -- make test
+
+# Group related remote work under one execution context
 herdr-command exec --ssh build-host --cwd /srv/project --context build-tree -- make all
 ```
 
-Use a configured SSH alias; normal SSH authentication and host verification apply.
-Establish authentication and trust interactively beforehand. Automation uses
-BatchMode and never accepts a new host key itself. Each command requires an
-explicit working directory. Arguments after `--` are literal argv values;
-pipelines and redirection require an explicit interpreter such as `sh -c`.
-Execution is general purpose and can modify files: review the command you run.
+For shell features such as pipelines or redirection, call a shell explicitly:
 
-From a Herdr pane, add `--view` before `--` to open a dedicated output tab without
-stealing focus. Outside Herdr, supply `--workspace` with an explicitly chosen
-local workspace ID. Execution continues even if the viewer cannot open.
-Add `--progress` to print execution stages and elapsed time on stderr, including
-five-second updates during quiet waits. Stdout retains its result-path interface
-and captured stdout/stderr files contain only the command's output. The viewer
-shows context-verification progress and the actual executed argv once available.
-An optional `--label` names the request in the viewer; it does not replace the
-recorded executed argv. Long command previews are shortened only in the viewer.
-You can also display a run independently:
+```sh
+herdr-command exec --cwd /absolute/path/to/project -- sh -c 'make test | tee test.log'
+```
+
+Add `--view` before `--` from a Herdr pane to open a dedicated output tab
+without stealing focus. Outside Herdr, pass an explicitly chosen
+`--workspace` ID instead. A command continues running if the viewer cannot be
+opened. Use `--label` to give the viewer request a short name; the executed
+arguments remain the source of record. You can also open a saved run directly:
 
 ```sh
 herdr-command view /path/to/run-directory
 ```
 
-The CLI prints the result file immediately. It records `stdout.bin`, `stderr.bin`,
-`transport.log`, and `result.json` in a private run directory outside the repo,
-by default `~/.local/state/herdr-command/runs`. Override its parent with
-`--output-dir`. The viewer sanitizes terminal controls; the binary files preserve
-exact bytes. stdout/stderr ordering across streams is not guaranteed.
+Add `--progress` to print execution stages and elapsed time on stderr, including
+five-second updates during quiet waits. Stdout retains its result-path interface
+and captured stdout/stderr files contain only the command's output. The viewer
+shows context-verification progress and the actual executed argv once available.
 
-The result contains command arguments, execution context, timestamps, artifact
-paths, and the actual child exit status (including signal termination). The CLI
-returns 0 for success, 1 for failure/rejection, 75 for busy, 125 for unknown outcome,
-and 2 for invalid usage. Read `exit_code` for the actual command exit status.
+## Use a prepared Herdr pane
 
-## Reliability boundaries
-
-- Foreground, non-interactive commands only: stdin is closed and there is no PTY.
-  Programs may buffer output when not attached to a terminal; use their own
-  unbuffered option when needed. Interactive password prompts are unsupported.
-- No overall timeout by default. `--timeout SECONDS` is optional. Silence does
-  not imply failure. SSH has a 15-second connection-establishment timeout.
-- Timeout, interruption, broken SSH, or malformed protocol preserve captured
-  output and report **unknown** unless completion was received and validated.
-  Never automatically rerun a command whose outcome is unknown.
-- Closing the viewer does not stop the runner. Closing/killing the runner can
-  interrupt its transport; remote termination is not guaranteed. SIGKILL or power
-  loss can leave a stale `running` record: it is not proof the command still runs.
-- Per-host file locks reject simultaneous commands in the same context. Default
-  context is the canonical working directory; `--context` groups related work.
-  Locks coordinate this tool, not unrelated programs. Commands that daemonize or
-  close inherited descriptors can escape its lifecycle and are unsupported.
-- Login shell output written to SSH stdout corrupts the protocol and fails
-  visibly. Fix noisy non-interactive startup scripts rather than trusting partial
-  captures. SSH diagnostics are kept in `transport.log`.
-- Raw artifacts and command arguments can contain secrets; keep them private.
-  Disk usage grows with output. Disk-write failures produce an unknown outcome.
-  No telemetry or uploads are performed.
-
-## Reuse a prepared Herdr machine pane
-
-Use a dedicated idle shell that already has the desired environment. Select its
-remote pane ID explicitly; the runner never picks the focused pane or creates a
-replacement. The saved machine must be enabled and reachable.
+Use this mode when the remote command must run in a dedicated shell that already
+has the required environment. Select the remote pane yourself; the runner never
+chooses the focused pane or creates a replacement.
 
 ```sh
+# Bind a dedicated, idle pane once
 herdr-command bind --machine "Build machine" --pane w1:p1 --output /private/path/build-pane.json
+
+# Submit work through that pane
 herdr-command exec --binding /private/path/build-pane.json --cwd /srv/project -- make test
 ```
 
-Alternatively use `exec --machine "Build machine" --pane w1:p1 --cwd /srv/project`.
-`--herdr-bin PATH` selects a compatible CLI/launcher. The SSH target is taken from
-the saved machine; an explicitly provided `--ssh` must match it.
+You can instead supply `--machine "Build machine" --pane w1:p1` directly. The
+saved machine must be enabled and reachable, and the designated pane should stay
+dedicated to automation while requests are active.
 
-With a saved binding, each run validates its local machine/target/session fields,
-stages a private single-use request through SSH, then checks the live pinned
-terminal and foreground shell immediately before submission. The two independent
-read-only pane checks run concurrently. Herdr Machine launches capture inside
-that existing shell. It inherits the shell environment. An adapter's `prepare`
-hook still verifies context, but its `enter` hook is skipped. There is no repeated
-context startup and no terminal-output scraping. The helper stays in the
-foreground; a file reservation rejects concurrent or unresolved submissions.
+## Results and important behavior
 
-Requests expire if not started within `--startup-timeout` seconds (default 60),
-so delayed terminal input cannot execute an old request later. That deadline is
-separate from the optional overall execution timeout. A request can only be
-claimed once. A changed terminal/shell requires re-registration.
+The CLI immediately prints the result-file path. By default, artifacts are kept
+in `~/.local/state/herdr-command/runs`; use `--output-dir` to choose another
+parent directory. `result.json` records the command, context, timestamps,
+artifact paths, and child exit status. Use its `exit_code` for the command's
+actual status.
 
-The VM saves a private framed capture under
-`~/.local/state/herdr-command/pane-runs/<remote_run>/`. Local result metadata records
-its ID. If SSH drops, capture can continue in the remote pane. Recover it with:
+- Commands are foreground and non-interactive: stdin is closed and no PTY is
+  provided. Password prompts and daemonizing commands are unsupported.
+- `--timeout` is optional. A timeout, interruption, malformed protocol, or SSH
+  disconnect preserves captured output but reports an **unknown** outcome. Do
+  not automatically rerun an unknown command.
+- Per-host locks prevent simultaneous runner submissions in the same context;
+  they do not control unrelated programs or manual typing in a prepared pane.
+- Artifacts and command arguments can contain secrets. Keep run directories
+  private and remove remote pane artifacts only after execution has finished.
 
-```sh
-herdr-command recover /path/to/original/local/run-directory
-```
+For SSH runs, use a configured host alias and establish authentication and host
+trust interactively first. Automation runs in batch mode and never accepts a new
+host key itself; SSH diagnostics are saved in `transport.log`.
 
-Recovery only reads that capture; it never sends a pane command. Keep local
-`request.json` with `result.json` for recovery. Remote artifacts are retained until
-you deliberately remove them after execution ends. A killed capture with no
-final result remains unknown and can require manual inspection; never delete a
-reservation merely to force another execution.
-
-Keep the designated pane dedicated to automation while requests are active.
-Herdr's process check and input submission are separate API calls, so they do
-not atomically reserve a prompt against a person typing at the same moment.
-Checks before submission, parent-shell verification, expiry, and single-use
-claims reduce mistakes but do not make concurrent manual input safe.
-
-No cached liveness or ADE result authorizes execution. The remote helper still
-checks its actual parent shell and the adapter verifies ADE context on each run.
-If the final pane check fails, nothing is submitted; an already-staged unused
-reservation may remain until its startup deadline expires. Do not automatically
-retry or delete reservations to bypass a busy/unknown result.
+If a prepared-pane SSH connection drops, the remote capture can continue. Use
+`herdr-command recover /path/to/original/local/run-directory` to read the saved
+capture; recovery never sends another pane command.
 
 ## Test and extend
 
@@ -147,21 +120,22 @@ python3 -m unittest discover -s tests -v
 python3 tests/stress_long.py
 ```
 
-Tests use synthetic commands and a fake SSH transport through real local shells.
-They require no product-specific tools or private network access. The separate
-long test takes just over five minutes. See [adapter contract](docs/adapters.md)
-and [validation](docs/validation.md).
+The test suite uses synthetic commands and a fake SSH transport through real
+local shells. It needs no product-specific tools or private network access. The
+long test takes a little over five minutes.
 
-## Uninstall and publication
+For implementation details, see the [adapter contract](docs/adapters.md) and
+the [validation record](docs/validation.md).
+
+## Uninstall
 
 ```sh
 herdr plugin unlink community.command-runner
 ```
 
-Remove your PATH entry separately. Unlinking preserves source and private run
-artifacts. Delete those only when no command is active and you no longer need them.
+Remove the `PATH` entry separately if you no longer need the CLI. Unlinking
+keeps source files and private run artifacts intact.
 
-This repository has no publishing remote or selected license yet. Before a public
-release, choose an appropriate license and review the tracked files/history.
-Do not add private adapters, configuration, captured output, or credentials.
-The plugin is independent of any product-specific toolkit.
+Before making the project public, choose a license and review tracked files and
+history. Do not publish private adapters, configuration, captured output, or
+credentials.
