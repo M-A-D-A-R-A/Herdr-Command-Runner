@@ -194,6 +194,36 @@ class RunnerTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             protocol.feed(b"J" + struct.pack("!I", len(payload)) + payload)
 
+    def test_progress_keeps_result_path_and_raw_output_separate(self):
+        proc, result, folder = self.execute("print('raw evidence')", "--progress")
+        self.assertEqual(result['status'], 'succeeded')
+        self.assertIn('[command |', proc.stderr)
+        self.assertNotIn('[command |', proc.stdout)
+        self.assertEqual((folder/'stdout.bin').read_text(), 'raw evidence\n')
+
+    def test_adapter_progress_and_executed_command_appear_in_viewer(self):
+        adapter = self.root/'adapter.py'
+        adapter.write_text("def prepare_with_progress(c,a,d,n):\n n('Checking test context');return a,d,{'verified':True}\n")
+        # entered=True is only needed for adapters supplying an enter hook.
+        adapter.write_text(adapter.read_text() + "def enter(c,b): return ['/bin/sh','-c',b]\n")
+        proc, result, folder = self.execute("print('viewer evidence')", '--adapter', str(adapter), '--progress', '--label', 'Context check')
+        self.assertEqual(proc.returncode,0,proc.stderr)
+        self.assertIn('Checking test context',proc.stderr)
+        view = subprocess.run([sys.executable,str(CLI),'view',str(folder)],capture_output=True,text=True,timeout=10)
+        self.assertEqual(view.returncode,0,view.stderr)
+        self.assertIn('Executing:',view.stdout)
+        self.assertIn('Requested: Context check',view.stdout)
+        self.assertIn('viewer evidence',view.stdout)
+        self.assertIn('succeeded',view.stdout)
+
+    def test_viewer_failure_does_not_stop_capture(self):
+        self.env['HERDR_BIN_PATH']='/nonexistent/herdr'
+        proc,result,folder=self.execute("print('still captured')",'--view','--workspace','test-workspace')
+        self.assertEqual(proc.returncode,0,proc.stderr)
+        self.assertIn('Viewer unavailable',proc.stderr)
+        self.assertIn('viewer_error',result)
+        self.assertEqual((folder/'stdout.bin').read_text(),'still captured\n')
+
 
 if __name__ == "__main__":
     unittest.main()

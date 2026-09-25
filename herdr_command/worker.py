@@ -97,7 +97,12 @@ def main(request, source):
         argv = request["argv"]
         provenance = {"hostname": os.uname().nodename, "cwd": cwd, "context": context}
         if adapter:
-            argv, cwd, extra = adapter["prepare"](request["adapter_config"], argv, cwd)
+            notify = lambda phase: control(event="progress", phase=phase)
+            notify("Verifying execution context")
+            if "prepare_with_progress" in adapter:
+                argv, cwd, extra = adapter["prepare_with_progress"](request["adapter_config"], argv, cwd, notify)
+            else:
+                argv, cwd, extra = adapter["prepare"](request["adapter_config"], argv, cwd)
             provenance.update(extra)
             provenance["cwd"] = cwd
         process = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.DEVNULL,

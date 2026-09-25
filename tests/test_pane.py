@@ -67,7 +67,7 @@ class PaneTests(unittest.TestCase):
         capture.communicate(timeout=10)
         output, events, _ = self.results(relay)
         self.assertEqual(b"".join(x[1] for x in output), b"inherited output\n")
-        self.assertTrue(events[0]["provenance"]["prepared"])
+        self.assertTrue(next(e for e in events if e["event"] == "started")["provenance"]["prepared"])
         self.assertEqual(events[-1]["exit_code"], 0)
 
     def test_busy_reservation_rejects_second_submission(self):

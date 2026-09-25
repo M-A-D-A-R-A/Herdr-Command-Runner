@@ -31,6 +31,14 @@ the inner endpoint exits. It must not rewrite the bootstrap or start detached jo
 `prepare` must finish verification before returning the command, avoid source
 mutations, and use bounded capture for its own diagnostics.
 
+An adapter may additionally implement
+`prepare_with_progress(config, argv, cwd, notify)`. When present, the runner calls
+this hook instead of `prepare`, with the same return contract. Call
+`notify("Checking context identity")` for a short stage message; do not print it
+to stdout. Messages use validated control frames and appear in `result.json`
+as `phase`, in the viewer, and on stderr with `--progress`. They never establish
+completion or replace context verification. Existing adapters need no change.
+
 Use a stable `--context` identity for mutually exclusive work even if different
 directories refer to it. No plugin registry or implicit adapter discovery is used.
 Private context adapters can live in separate repositories; the public runner

@@ -38,6 +38,12 @@ Execution is general purpose and can modify files: review the command you run.
 From a Herdr pane, add `--view` before `--` to open a dedicated output tab without
 stealing focus. Outside Herdr, supply `--workspace` with an explicitly chosen
 local workspace ID. Execution continues even if the viewer cannot open.
+Add `--progress` to print execution stages and elapsed time on stderr, including
+five-second updates during quiet waits. Stdout retains its result-path interface
+and captured stdout/stderr files contain only the command's output. The viewer
+shows context-verification progress and the actual executed argv once available.
+An optional `--label` names the request in the viewer; it does not replace the
+recorded executed argv. Long command previews are shortened only in the viewer.
 You can also display a run independently:
 
 ```sh

@@ -7,11 +7,13 @@ import math
 import os
 from pathlib import Path
 import selectors
+import shlex
 import shutil
 import signal
 import struct
 import subprocess
 import sys
+import threading
 import time
 import uuid
 
@@ -20,6 +22,38 @@ from .worker import bootstrap, write_all
 from .machine import Machine
 
 PLUGIN_ID = "community.command-runner"
+
+
+class Progress:
+    """Human progress goes to stderr; stdout remains the result-path interface."""
+    def __init__(self, enabled):
+        self.enabled = enabled
+        self.started = time.monotonic()
+        self.phase = "Preparing request"
+        self.stop = threading.Event()
+
+    def report(self):
+        if self.enabled:
+            message = SafeText().feed(str(self.phase).encode())
+            print("[command | {:.0f}s] {}".format(time.monotonic()-self.started, message), file=sys.stderr, flush=True)
+
+    def update(self, phase):
+        self.phase = phase
+        self.report()
+
+    def __enter__(self):
+        def heartbeat():
+            while not self.stop.wait(5):
+                self.report()
+        self.thread = threading.Thread(target=heartbeat, daemon=True)
+        if self.enabled:
+            self.thread.start()
+        return self
+
+    def __exit__(self, *args):
+        self.stop.set()
+        if self.enabled:
+            self.thread.join()
 
 
 def now():
@@ -88,6 +122,8 @@ class Protocol:
                 event = item.get("event")
                 if event == "prepared" and not self.prepared and not self.started:
                     self.prepared = True
+                elif event == "progress" and not self.started and isinstance(item.get("phase"), str):
+                    pass
                 elif event == "started" and not self.started:
                     self.started = True
                 elif event == "result":
@@ -121,9 +157,15 @@ def open_viewer(directory, workspace=None):
 
 
 def execute(args):
+    with Progress(getattr(args, "progress", False)) as progress:
+        return execute_with_progress(args, progress)
+
+
+def execute_with_progress(args, progress):
     binding = json.loads(Path(args.binding).expanduser().read_text()) if args.binding else None
     machine = None
     if binding or args.machine or args.pane:
+        progress.update("Checking the registered machine, pane, and foreground shell")
         selector = args.machine or (binding or {}).get("machine")
         pane = args.pane or (binding or {}).get("pane_id")
         if not selector or not pane:
@@ -166,6 +208,7 @@ def execute(args):
                if args.ssh else [sys.executable, str(Path(__file__).with_name("worker.py"))])
     result = dict(version=__version__, run_id=directory.name, status="starting", started_at=now(),
                   argv=argv, target=args.ssh or "local", cwd=args.cwd, context=args.context,
+                  label=getattr(args, "label", None),
                   exit_code=None, artifacts={name: str(directory / name) for name in
                   ("stdout.bin", "stderr.bin", "transport.log", "result.json")})
     if pane_mode:
@@ -184,6 +227,9 @@ def execute(args):
         error = open_viewer(directory, args.workspace)
         if error:
             result["viewer_error"] = error
+            print("Viewer unavailable: " + error, file=sys.stderr, flush=True)
+            save(directory / "result.json", result)
+    progress.update("Connecting and staging the request" if args.ssh else "Starting local capture")
     started = time.monotonic()
     process = None
     selector = selectors.DefaultSelector()
@@ -198,10 +244,17 @@ def execute(args):
                     if machine is None or getattr(args, "recover_request", None):
                         raise ValueError("Unexpected pane launch request")
                     result.update(status="submitting", remote_directory=item["remote_directory"])
+                    progress.update("Checking the pane again and submitting capture")
                     save(directory / "result.json", result)
                     machine.launch(item["command"])
+                    progress.update("Waiting for the capture helper to verify context")
+                elif item["event"] == "progress":
+                    result.update(phase=item["phase"])
+                    progress.update(item["phase"])
                 elif item["event"] == "started":
                     result.update(status="running", provenance=item["provenance"], pid=item["pid"], executed_argv=item["argv"])
+                    result["phase"] = "Running command and capturing output"
+                    progress.update(result["phase"])
                 else:
                     final_received = True
                     result.update({key: value for key, value in item.items() if key not in ("nonce", "event")})
@@ -271,6 +324,7 @@ def execute(args):
         result.update(finished_at=now(), elapsed_seconds=round(time.monotonic() - started, 3))
         save(directory / "result.json", result)
     print("{} (exit {})".format(result["status"], result["exit_code"]))
+    progress.update("{} (exit {})".format(result["status"], result["exit_code"]))
     return 0 if result["status"] == "succeeded" else 75 if result["status"] == "busy" else 125 if result["status"] == "unknown" else 1
 
 
@@ -282,10 +336,20 @@ def viewer(path):
     cleaners = {name: SafeText() for name in offsets}
     last_status = None
     last_tick = 0
+    shown_command = None
     while True:
         result = json.loads((directory / "result.json").read_text())
         if last_status is None:
-            print(SafeText().feed(json.dumps({key: result.get(key) for key in ("argv", "target", "cwd", "context")}).encode()), flush=True)
+            header = "Command Runner\nRequested: {}\nTarget: {}\nDirectory: {}\nContext: {}\nArtifacts: {}\n".format(
+                result.get("label") or shlex.join(result.get("argv", [])), result.get("target"), result.get("cwd"),
+                result.get("context") or "default", directory)
+            print(SafeText().feed(header.encode()), flush=True)
+        if result.get("executed_argv") and shown_command != result["executed_argv"]:
+            shown_command = result["executed_argv"]
+            command_text = shlex.join(shown_command)
+            if len(command_text) > 400:
+                command_text = command_text[:400] + " ... [full argv in result.json]"
+            print("\nExecuting: " + SafeText().feed(command_text.encode()), flush=True)
         for name in offsets:
             path = directory / name
             if path.exists():
@@ -297,12 +361,15 @@ def viewer(path):
                     if name != "stdout.bin":
                         print("\n[{}]".format(name), flush=True)
                     print(cleaners[name].feed(data), end="", flush=True)
-        if result["status"] != last_status or time.monotonic() - last_tick >= 5:
+        visible_status = (result["status"], result.get("phase"))
+        if visible_status != last_status or time.monotonic() - last_tick >= 5:
             elapsed = (datetime.datetime.now(datetime.timezone.utc) - datetime.datetime.fromisoformat(result["started_at"])).total_seconds()
             print("\n[{} | {:.0f}s | exit {}]".format(result["status"], result.get("elapsed_seconds", elapsed), result["exit_code"]), flush=True)
-            if result.get("provenance") and result["status"] != last_status:
+            if result.get("phase") and result["status"] in ("starting", "submitting", "running"):
+                print(SafeText().feed(result["phase"].encode()), flush=True)
+            if result.get("provenance") and visible_status != last_status:
                 print(SafeText().feed(json.dumps(result["provenance"]).encode()), flush=True)
-            last_status = result["status"]
+            last_status = visible_status
             last_tick = time.monotonic()
         drained = all(not (directory / name).exists() or offsets[name] >= (directory / name).stat().st_size for name in offsets)
         if result.get("finished_at") and drained:
@@ -324,12 +391,14 @@ def main():
     bind.add_argument("--pane", required=True)
     bind.add_argument("--output", required=True)
     bind.add_argument("--herdr-bin", default=os.environ.get("HERDR_COMMAND_HERDR_BIN", "herdr"))
+    bind.add_argument("--progress", action="store_true")
     recover = sub.add_parser("recover", help="Collect an existing pane run without submitting a command")
     recover.add_argument("directory")
     recover.add_argument("--output-dir")
     recover.add_argument("--timeout", type=float)
     recover.add_argument("--view", action="store_true")
     recover.add_argument("--workspace")
+    recover.add_argument("--progress", action="store_true")
     view = sub.add_parser("view")
     view.add_argument("directory", nargs="?", default=os.environ.get("HERDR_COMMAND_RUN"))
     run = sub.add_parser("exec")
@@ -342,9 +411,11 @@ def main():
     run.add_argument("--startup-timeout", type=float, default=60,
                      help="Pane request expires if not started within this many seconds (default 60)")
     run.add_argument("--context", help="Serialize commands sharing this context on the execution host")
+    run.add_argument("--label", help="Human-readable request label; actual executed argv is recorded separately")
     run.add_argument("--output-dir", help="Parent directory for private per-run artifacts")
     run.add_argument("--timeout", type=float, help="Optional overall timeout in seconds")
     run.add_argument("--view", action="store_true")
+    run.add_argument("--progress", action="store_true", help="Print stages and elapsed time on stderr")
     run.add_argument("--workspace")
     run.add_argument("--adapter", help="Explicitly trusted Python context adapter")
     run.add_argument("--adapter-config", help="Private JSON configuration for adapter")
@@ -357,7 +428,9 @@ def main():
                               "platform": sys.platform, "remote": "Use exec for a target-specific probe"}, indent=2))
             return 0
         if args.action == "bind":
-            selected = Machine(args.machine, args.pane, args.herdr_bin)
+            with Progress(args.progress) as progress:
+                progress.update("Checking machine and prepared foreground shell")
+                selected = Machine(args.machine, args.pane, args.herdr_bin)
             path = Path(args.output).expanduser().resolve()
             os.umask(0o077)
             path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)

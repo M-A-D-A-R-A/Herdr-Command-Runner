@@ -15,8 +15,8 @@ Validated on 2026-09-25. Private artifacts are intentionally outside this reposi
 | Viewer | Separate-process viewer closure leaves command running; terminal-control sanitizer tested |
 | Herdr integration | Manifest accepted and plugin linked locally with Herdr 0.9.1 |
 
-Actual Herdr pane rendering remains a manual smoke test: this implementation
-session was outside a Herdr-managed pane. From a Herdr pane, run:
+Actual Herdr pane rendering was subsequently verified in an isolated named
+test session. To repeat from a Herdr pane, run:
 
 ```sh
 herdr-command exec --cwd /tmp --view -- python3 -u -c 'import time; print("start"); time.sleep(5); print("done")'
@@ -39,3 +39,12 @@ expired requests, concurrent submission rejection, empty successful Herdr
 responses, and disconnect/recovery without re-execution. The existing capture
 suite continues to pass. A live remote prepared-shell run and recovery were
 verified; product-specific results remain in the private adapter repository.
+
+Usability follow-up: 27 runner tests passed, covering stderr progress without
+contaminating captured output, adapter progress, viewer command display, and
+capture continuing after viewer launch failure. Real plugin panes displayed
+stdout/stderr, elapsed time, and successful completion without taking focus.
+Closing a real viewer during a 25-second command preserved complete output and
+exit status 0. Read-only private-adapter verification also displayed its stages
+and captured result in that isolated session. The temporary test server was
+stopped after validation; existing user sessions were not stopped or restarted.
